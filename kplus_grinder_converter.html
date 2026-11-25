@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>K-Plus 입도·레시피 정밀 치환 엔진</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel CDN for inline JSX transformation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+    .font-mono-tabular { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #D6CFC2; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-neutral-50 text-neutral-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    // --- 유명 바리스타 및 로스터리 레시피 프리셋 ---
+    const PRESET_RECIPES = [
+      {
+        id: 'hoffmann-v60',
+        name: 'James Hoffmann 1-Cup V60',
+        author: 'James Hoffmann',
+        grinder: 'c40_std',
+        setting: 23,
+        roast: 'light',
+        brewMethod: 'v60_multi',
+        mode: 'flow',
+        desc: '15g 원두 / 250g 물 (5회 분할 푸어). 코만단테 23클릭 기준의 높은 수율 레시피로, K-Plus 사용 시 5회 푸어로 인한 미분 막힘 방지가 핵심입니다.'
+      },
+      {
+        id: 'kasuya-46',
+        name: 'Tetsu Kasuya 4:6 Method',
+        author: 'Tetsu Kasuya (2016 WBrC)',
+        grinder: 'c40_std',
+        setting: 29,
+        roast: 'light',
+        brewMethod: 'v60_multi',
+        mode: 'clarity',
+        desc: '굵은 분쇄도와 5회 푸어를 통해 클린컵과 산미/단맛 밸런스를 조절하는 레시피입니다. 굵은 영역에서의 코니컬 버 2차 파쇄 편차를 보정합니다.'
+      },
+      {
+        id: 'rao-ek43',
+        name: 'Scott Rao / Perger EK43 V60',
+        author: 'Scott Rao & Matt Perger',
+        grinder: 'ek43_11',
+        setting: 8.2,
+        roast: 'light',
+        brewMethod: 'v60_single',
+        mode: 'flow',
+        desc: '98mm 플랫버의 극단적인 단봉형 입도를 활용한 고수율 추출입니다. K-Plus로 단순 D50 매칭 시 미분 과다로 유속이 크게 느려지므로 수리학적 보정이 필수입니다.'
+      },
+      {
+        id: 'onyx-flat',
+        name: 'Onyx Kalita / Orea Flat Bed',
+        author: 'Onyx Coffee Lab',
+        grinder: 'c40_red',
+        setting: 42,
+        roast: 'med_light',
+        brewMethod: 'flat_bottom',
+        mode: 'clarity',
+        desc: '레드클릭스 42클릭(일반 21클릭)을 사용한 플랫 바텀 드리퍼 레시피입니다. 단맛과 바디감을 살리면서 텁텁함을 억제하는 세팅으로 변환합니다.'
+      },
+      {
+        id: 'ek-allonge',
+        name: 'Turbo / Allongé Espresso',
+        author: 'Modern Specialty',
+        grinder: 'ek43_11',
+        setting: 2.3,
+        roast: 'light',
+        brewMethod: 'espresso',
+        mode: 'flow',
+        desc: 'EK43 약배전 터보샷/알롱제 세팅입니다. 퍽 저항을 결정하는 미분 비율 차이 때문에 K-Plus에서는 D50을 한 단계 굵게 잡아야 채널링을 막습니다.'
+      }
+    ];
+
+    // --- 그라인더 제원 및 물리 상수 데이터 ---
+    const GRINDER_SPECS = {
+      c40_std: {
+        id: 'c40_std',
+        name: 'Comandante C40 MK3/MK4 (Standard)',
+        shortName: 'C40 Standard',
+        burrType: '39mm Heptagonal Conical (Nitro Blade)',
+        stepVerticalUm: 30, // 축 수직 이동량 30µm/click
+        d50Slope: 28.5, // 클릭당 실제 입도(D50) 증가량 (µm)
+        d50Intercept: 95, // 0점 영점 부근 최소 입도 오프셋
+        gapRatio: 0.72, // 수직 이동 대비 실제 버 간격 비율 (코니컬 각도 cos θ 반영)
+        baseSigma: 0.34, // 주 피크 로그정규분포 표준편차
+        baseFinesFactor: 1.0, // C40을 1.0 기준으로 설정
+        min: 5,
+        max: 40,
+        step: 1,
+        unit: '클릭'
+      },
+      c40_red: {
+        id: 'c40_red',
+        name: 'Comandante C40 (Red Clix RX35)',
+        shortName: 'C40 Red Clix',
+        burrType: '39mm Heptagonal Conical (Fine Pitch Axle)',
+        stepVerticalUm: 15,
+        d50Slope: 14.25,
+        d50Intercept: 95,
+        gapRatio: 0.72,
+        baseSigma: 0.34,
+        baseFinesFactor: 1.0,
+        min: 10,
+        max: 80,
+        step: 1,
+        unit: '레드클릭'
+      },
+      ek43_11: {
+        id: 'ek43_11',
+        name: 'Mahlkönig EK43 (1 - 11 Dial)',
+        shortName: 'EK43 (1-11)',
+        burrType: '98mm Cast Steel Flat Burr (Turkish/Coffee)',
+        stepVerticalUm: 90,
+        d50Slope: 82,
+        d50Intercept: 80,
+        gapRatio: 1.0,
+        baseSigma: 0.22,
+        baseFinesFactor: 0.62,
+        min: 1.0,
+        max: 11.0,
+        step: 0.1,
+        unit: '다이얼 (1-11)'
+      },
+      ek43_16: {
+        id: 'ek43_16',
+        name: 'Mahlkönig EK43S / New (0 - 16 Dial)',
+        shortName: 'EK43 (0-16)',
+        burrType: '98mm Cast Steel Flat Burr (0-16 Scale)',
+        stepVerticalUm: 65,
+        d50Slope: 59.5,
+        d50Intercept: 80,
+        gapRatio: 1.0,
+        baseSigma: 0.22,
+        baseFinesFactor: 0.62,
+        min: 1.0,
+        max: 16.0,
+        step: 0.1,
+        unit: '다이얼 (0-16)'
+      },
+      k_plus: {
+        id: 'k_plus',
+        name: '1Zpresso K-Plus (K-Max / K-Pro)',
+        shortName: '1Zpresso K-Plus',
+        burrType: '48mm Heptagonal Conical (Stainless Steel)',
+        stepVerticalUm: 22, // 1클릭당 22µm 수직 이동 (1회전 90클릭 = 1.98mm)
+        d50Slope: 9.15,
+        d50Intercept: 92,
+        gapRatio: 0.68,
+        baseSigma: 0.37,
+        baseFinesFactor: 1.12
+      }
+    };
+
+    const ROAST_FACTORS = {
+      light: {
+        label: '약배전',
+        densityDesc: '고밀도·고탄성 조직 (파쇄 저항 높음, 미분 다량 발생)',
+        finesMultiplier: 1.18,
+        flowPenalty: 1.25
+      },
+      med_light: {
+        label: '중약배전',
+        densityDesc: '스페셜티 표준 배전도 (밸런스형 파쇄)',
+        finesMultiplier: 1.0,
+        flowPenalty: 1.0
+      },
+      medium: {
+        label: '중배전',
+        densityDesc: '다공성 발달 (잘 부서지며 미분 정체 완만)',
+        finesMultiplier: 0.92,
+        flowPenalty: 0.85
+      },
+      dark: {
+        label: '강배전',
+        densityDesc: '취성 극대화, 가스 배출 많음',
+        finesMultiplier: 1.08,
+        flowPenalty: 0.75
+      }
+    };
+
+    const BREW_METHODS = {
+      v60_multi: {
+        label: 'V60 다중 푸어 (3~5회 분할 주입)',
+        agitationFactor: 1.35,
+        desc: '분할 푸어 시 수류 교반이 반복되어 미세 입자(<100µm)가 페이퍼 기공을 막는 현상이 극대화됩니다.'
+      },
+      v60_single: {
+        label: 'V60 원푸어 / 2회 푸어 (저교반)',
+        agitationFactor: 1.0,
+        desc: '물줄기에 의한 미분 침강이 적어 비교적 원래 입도(D50)에 가깝게 추출됩니다.'
+      },
+      flat_bottom: {
+        label: '플랫 바텀 (Kalita Wave / Orea)',
+        agitationFactor: 1.15,
+        desc: '베드 깊이가 얕고 유속이 일정하지만 하단 배수구 저항의 영향을 받습니다.'
+      },
+      immersion: {
+        label: '침출식 / 에어로프레스 (Clever / Cupping)',
+        agitationFactor: 0.3,
+        desc: '중력 여과 저항(Darcy’s Law)의 영향을 거의 받지 않으므로 순수 표면적(D50) 일치가 가장 중요합니다.'
+      },
+      espresso: {
+        label: '에스프레소 / 터보샷 (9bar / 6bar)',
+        agitationFactor: 1.5,
+        desc: '고압 추출에서는 주 입도보다 미분 비율(<100µm)이 퍽의 수리학적 저항을 지배합니다.'
+      }
+    };
+
+    const COMPENSATION_MODES = {
+      flow: {
+        id: 'flow',
+        title: '유속 및 추출시간 동기화 (권장)',
+        badge: '실전 레시피 최적',
+        desc: '버 형상 차이로 발생하는 미분량과 커피 베드 투수율을 계산하여 원 레시피와 동일한 드로우다운(추출 시간) 및 수율을 구현합니다.'
+      },
+      clarity: {
+        id: 'clarity',
+        title: '클린컵 & 향미 밸런스 매칭',
+        badge: '클린컵 중심',
+        desc: '48mm K-Plus 특유의 높은 바디감과 미분 과다 추출을 억제하기 위해 분쇄도를 미세하게 풀고 온도와 교반 보정치를 함께 제시합니다.'
+      },
+      d50: {
+        id: 'd50',
+        title: '순수 입도 피크(D50) 1:1 매칭',
+        badge: '물리적 피크 일치',
+        desc: '유속 저항을 무시하고 레이저 회절 입도 분석기 기준 주 입도 피크(µm)만을 수학적으로 일치시킵니다.'
+      }
+    };
+
+    function App() {
+      const [sourceGrinder, setSourceGrinder] = useState('c40_std');
+      const [sourceSetting, setSourceSetting] = useState(24);
+      const [roastLevel, setRoastLevel] = useState('light');
+      const [brewMethod, setBrewMethod] = useState('v60_multi');
+      const [compMode, setCompMode] = useState('flow');
+      const [activePreset, setActivePreset] = useState(null);
+
+      // 그라인더 변경 시 기본값 자동 스케일링
+      const handleGrinderChange = (newGrinder) => {
+        setActivePreset(null);
+        const currentSpec = GRINDER_SPECS[sourceGrinder];
+        const currentD50 = currentSpec.d50Intercept + sourceSetting * currentSpec.d50Slope;
+
+        const nextSpec = GRINDER_SPECS[newGrinder];
+        let estimatedSetting = (currentD50 - nextSpec.d50Intercept) / nextSpec.d50Slope;
+        estimatedSetting = Math.max(nextSpec.min, Math.min(nextSpec.max, estimatedSetting));
+
+        if (nextSpec.step === 1) {
+          setSourceSetting(Math.round(estimatedSetting));
+        } else {
+          setSourceSetting(Number(estimatedSetting.toFixed(1)));
+        }
+        setSourceGrinder(newGrinder);
+      };
+
+      // 프리셋 적용 함수
+      const applyPreset = (preset) => {
+        setActivePreset(preset.id);
+        setSourceGrinder(preset.grinder);
+        setSourceSetting(preset.setting);
+        setRoastLevel(preset.roast);
+        setBrewMethod(preset.brewMethod);
+        setCompMode(preset.mode);
+      };
+
+      // --- 핵심 정량 물리 엔진 계산 ---
+      const analysis = useMemo(() => {
+        const src = GRINDER_SPECS[sourceGrinder];
+        const kplus = GRINDER_SPECS.k_plus;
+        const roast = ROAST_FACTORS[roastLevel];
+        const brew = BREW_METHODS[brewMethod];
+
+        // 1. 소스 그라인더의 정량적 치수 계산 (µm)
+        const srcVerticalUm = Math.round(sourceSetting * src.stepVerticalUm);
+        const srcBurrGapUm = Math.round(srcVerticalUm * src.gapRatio);
+        const srcD50Um = Math.round(src.d50Intercept + sourceSetting * src.d50Slope);
+
+        // 2. 소스 그라인더의 미분(<100µm) 비율 추정 (%)
+        const finenessIndex = Math.max(0.4, 1100 / Math.max(250, srcD50Um));
+        const srcFinesPct = Math.min(
+          38,
+          Math.max(4.5, 9.2 * Math.pow(finenessIndex, 0.72) * src.baseFinesFactor * roast.finesMultiplier)
+        );
+
+        // 3. 순수 D50 일치 기준 K-Plus 클릭수 계산
+        const rawKPlusClicksExact = (srcD50Um - kplus.d50Intercept) / kplus.d50Slope;
+        const rawKPlusClicks = Math.max(15, Math.min(130, Math.round(rawKPlusClicksExact)));
+
+        // 보정 전 K-Plus 미분 비율
+        const kPlusUncompFinesPct = Math.min(
+          42,
+          Math.max(5.0, 9.2 * Math.pow(finenessIndex, 0.75) * kplus.baseFinesFactor * roast.finesMultiplier)
+        );
+
+        // 4. 버 형상 & 미분 차이에 따른 수리학적 유속 보정량 계산
+        const finesDiff = kPlusUncompFinesPct - srcFinesPct;
+        const distributionWidthDiff = kplus.baseSigma - src.baseSigma;
+
+        let clickCompensation = 0;
+        if (compMode === 'd50') {
+          clickCompensation = 0;
+        } else if (compMode === 'flow') {
+          const baseHydroShift = (finesDiff * 1.15) + (distributionWidthDiff * 18);
+          clickCompensation = baseHydroShift * brew.agitationFactor * roast.flowPenalty;
+        } else if (compMode === 'clarity') {
+          const baseClarityShift = (finesDiff * 1.35) + (distributionWidthDiff * 24);
+          clickCompensation = baseClarityShift * Math.max(0.8, brew.agitationFactor) * roast.flowPenalty;
+        }
+
+        const compensatedClicksExact = rawKPlusClicksExact + clickCompensation;
+        const recommendedClicks = Math.max(15, Math.min(135, Math.round(compensatedClicksExact)));
+        const clickDelta = recommendedClicks - rawKPlusClicks;
+
+        // 5. 추천 세팅 기준 정량 스펙
+        const kPlusVerticalUm = recommendedClicks * kplus.stepVerticalUm;
+        const kPlusBurrGapUm = Math.round(kPlusVerticalUm * kplus.gapRatio);
+        const kPlusTargetD50Um = Math.round(kplus.d50Intercept + recommendedClicks * kplus.d50Slope);
+
+        const compFinenessIndex = Math.max(0.35, 1100 / Math.max(250, kPlusTargetD50Um));
+        const kPlusCompFinesPct = Math.min(
+          42,
+          Math.max(4.8, 9.2 * Math.pow(compFinenessIndex, 0.75) * kplus.baseFinesFactor * roast.finesMultiplier)
+        );
+
+        // 6. 유체역학적 유효 입경
+        const srcEffectiveHydroUm = Math.round(srcD50Um / (1 + (srcFinesPct / 100) * 3.4));
+        const kPlusUncompHydroUm = Math.round(srcD50Um / (1 + (kPlusUncompFinesPct / 100) * 3.4));
+        const kPlusCompHydroUm = Math.round(kPlusTargetD50Um / (1 + (kPlusCompFinesPct / 100) * 3.4));
+
+        // 7. 다이얼 표기
+        const rotations = Math.floor(recommendedClicks / 90);
+        const remAfterRot = recommendedClicks % 90;
+        const dialNumber = Math.floor(remAfterRot / 10);
+        const subClick = remAfterRot % 10;
+        const dialString = `${rotations}회전 - 숫자 ${dialNumber} - ${subClick}클릭`;
+        const shortDialCode = `${rotations}-${dialNumber}-${subClick}`;
+
+        // 8. 가이드 생성
+        let tempDelta = 0;
+        let pourAdvice = '';
+        let drawdownPrediction = '';
+
+        if (sourceGrinder.startsWith('ek43')) {
+          tempDelta = compMode === 'd50' ? -3 : -1.5;
+          pourAdvice = 'EK43 레시피의 강한 교반(Rao Spin, 강한 스월링)을 K-Plus에서 그대로 따라 하면 미분이 필터 하단에 침착되어 후반부 유속이 급격히 막힙니다. 스월링은 마지막 푸어 직후 가볍게 1~2회만 수행하세요.';
+          drawdownPrediction = clickDelta > 0
+            ? `보정 미적용 시 원 레시피보다 약 +25~40초 지연됨 → +${clickDelta}클릭 보정으로 추출 시간 동기화 완료`
+            : '주의: 순수 D50 매칭 사용 시 EK43 대비 추출 시간이 30초 이상 길어지고 과다추출(떫은맛) 위험이 높습니다.';
+        } else {
+          tempDelta = compMode === 'd50' ? -1 : -0.5;
+          pourAdvice = '48mm K-Plus 버는 39mm 코만단테보다 분쇄 속도가 약 2배 빠르며 원두가 버에 머무는 시간이 짧지만, 순간 파쇄 토크가 높아 미분이 약 1.2~1.8%p 더 생성됩니다. 중심부 위주의 부드러운 수직 푸어를 권장합니다.';
+          drawdownPrediction = clickDelta > 0
+            ? `보정 미적용 시 C40 대비 약 +10~18초 지연 → +${clickDelta}클릭 보정으로 동일한 유속 확보`
+            : 'C40와 유사한 추출 흐름을 보이나 후반부 드립 베드가 약간 더 조밀해집니다.';
+        }
+
+        return {
+          src,
+          kplus,
+          srcVerticalUm,
+          srcBurrGapUm,
+          srcD50Um,
+          srcFinesPct: Number(srcFinesPct.toFixed(1)),
+          rawKPlusClicks,
+          recommendedClicks,
+          clickDelta,
+          kPlusVerticalUm,
+          kPlusBurrGapUm,
+          kPlusTargetD50Um,
+          kPlusUncompFinesPct: Number(kPlusUncompFinesPct.toFixed(1)),
+          kPlusCompFinesPct: Number(kPlusCompFinesPct.toFixed(1)),
+          srcEffectiveHydroUm,
+          kPlusUncompHydroUm,
+          kPlusCompHydroUm,
+          rotations,
+          dialNumber,
+          subClick,
+          dialString,
+          shortDialCode,
+          tempDelta,
+          pourAdvice,
+          drawdownPrediction
+        };
+      }, [sourceGrinder, sourceSetting, roastLevel, brewMethod, compMode]);
+
+      // 입도 분포 곡선 계산
+      const psdChartData = useMemo(() => {
+        const points = [];
+        const numSteps = 90;
+        const minUm = 30;
+        const maxUm = 1550;
+
+        const { src, kplus, srcD50Um, kPlusTargetD50Um, srcFinesPct, kPlusUncompFinesPct, kPlusCompFinesPct } = analysis;
+
+        const calcBimodalHeight = (x, d50, sigma, finesPct) => {
+          if (x <= 0) return 0;
+          const finesPeakCenter = 80;
+          const finesSigma = 0.55;
+          const finesAmp = (finesPct / 15) * 0.28;
+          const finesVal = finesAmp * Math.exp(-Math.pow(Math.log(x / finesPeakCenter), 2) / (2 * Math.pow(finesSigma, 2)));
+
+          const mainAmp = (0.34 / sigma) * 0.85;
+          const mainVal = mainAmp * Math.exp(-Math.pow(Math.log(x / d50), 2) / (2 * Math.pow(sigma, 2)));
+
+          return (finesVal + mainVal) * 100;
+        };
+
+        for (let i = 0; i <= numSteps; i++) {
+          const um = minUm + (i / numSteps) * (maxUm - minUm);
+          const srcY = calcBimodalHeight(um, srcD50Um, src.baseSigma, srcFinesPct);
+          const kUncompY = calcBimodalHeight(um, srcD50Um, kplus.baseSigma, kPlusUncompFinesPct);
+          const kCompY = calcBimodalHeight(um, kPlusTargetD50Um, kplus.baseSigma, kPlusCompFinesPct);
+
+          points.push({ um: Math.round(um), srcY, kUncompY, kCompY });
+        }
+
+        return points;
+      }, [analysis]);
+
+      const buildSvgPath = (data, key, width, height) => {
+        const maxUm = 1550;
+        const minUm = 30;
+        const maxY = 145;
+
+        return data
+          .map((pt, idx) => {
+            const x = ((pt.um - minUm) / (maxUm - minUm)) * width;
+            const y = height - Math.min(height - 8, (pt[key] / maxY) * (height - 20));
+            return `${idx === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+          })
+          .join(' ');
+      };
+
+      const buildSvgArea = (data, key, width, height) => {
+        const linePath = buildSvgPath(data, key, width, height);
+        return `${linePath} L ${width} ${height} L 0 ${height} Z`;
+      };
+
+      const currentSrcSpec = GRINDER_SPECS[sourceGrinder];
+      const card = 'bg-white border border-neutral-300 rounded';
+
+      return (
+        <div className="min-h-screen bg-neutral-50 text-neutral-900 pb-12">
+          <header className="border-b border-neutral-300 bg-white">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <h1 className="text-lg sm:text-xl font-semibold">K-Plus 입도·레시피 정밀 치환 엔진</h1>
+                </div>
+                <p className="text-xs text-neutral-500 mt-1">
+                  Comandante C40 / Mahlkönig EK43 → 1Zpresso K-Plus (48mm Heptagonal, 22µm/click)
+                </p>
+              </div>
+              <div className="text-xs text-neutral-600">
+                호환: <strong>K-Plus / K-Max / K-Pro</strong> (22µm/click · 90클릭/회전 동일 규격)
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
+            {/* 프리셋 */}
+            <section className={`${card} p-4`}>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-neutral-700">
+                  유명 바리스타 표준 레시피 원클릭 로드
+                </h2>
+                <span className="text-xs text-neutral-500 hidden sm:inline">
+                  클릭하면 원본 분쇄도와 추출 변수가 자동 입력됩니다
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                {PRESET_RECIPES.map((preset) => {
+                  const isSelected = activePreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      onClick={() => applyPreset(preset)}
+                      className={`text-left p-3 rounded border flex flex-col justify-between ${
+                        isSelected
+                          ? 'border-neutral-900 bg-neutral-100'
+                          : 'border-neutral-300 bg-white hover:bg-neutral-50'
+                      }`}
+                    >
+                      <div>
+                        <div className="text-sm font-medium">{preset.name}</div>
+                        <div className="text-xs text-neutral-500 mt-0.5">{preset.author}</div>
+                      </div>
+                      <div className="mt-2 pt-2 border-t border-neutral-200 text-xs text-neutral-700">
+                        {GRINDER_SPECS[preset.grinder].shortName}: {preset.setting}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              {activePreset && (
+                <div className="mt-3 p-3 rounded border border-neutral-200 bg-neutral-50 text-sm text-neutral-700">
+                  <span className="font-semibold">프리셋 레시피 노트: </span>
+                  {PRESET_RECIPES.find((p) => p.id === activePreset)?.desc}
+                </div>
+              )}
+            </section>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* 좌측: 입력 */}
+              <div className="lg:col-span-5">
+                <div className={`${card} p-5 space-y-6`}>
+                  <div className="flex items-baseline justify-between border-b border-neutral-200 pb-3">
+                    <h2 className="text-base font-semibold">1. 원본 그라인더 및 분쇄도 입력</h2>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm text-neutral-700">원본 레시피 그라인더 선택</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {['c40_std', 'c40_red', 'ek43_11', 'ek43_16'].map((gKey) => {
+                        const spec = GRINDER_SPECS[gKey];
+                        const active = sourceGrinder === gKey;
+                        return (
+                          <button
+                            key={gKey}
+                            onClick={() => handleGrinderChange(gKey)}
+                            className={`p-3 rounded border text-left ${
+                              active
+                                ? 'border-neutral-900 bg-neutral-100'
+                                : 'border-neutral-300 bg-white hover:bg-neutral-50'
+                            }`}
+                          >
+                            <div className="text-sm font-medium">{spec.shortName}</div>
+                            <div className="text-xs text-neutral-500 mt-0.5">{spec.burrType}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="border border-neutral-200 bg-neutral-50 rounded p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <span className="text-sm text-neutral-700 block">원본 분쇄 세팅 ({currentSrcSpec.unit})</span>
+                        <span className="text-xs text-neutral-500">
+                          축 이동량: {currentSrcSpec.stepVerticalUm}µm / {currentSrcSpec.step === 1 ? '1클릭' : '1.0눈금'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => {
+                            setActivePreset(null);
+                            setSourceSetting((prev) =>
+                              Math.max(currentSrcSpec.min, Number((prev - currentSrcSpec.step).toFixed(1)))
+                            );
+                          }}
+                          className="w-8 h-8 rounded border border-neutral-300 bg-white hover:bg-neutral-100"
+                        >
+                          -
+                        </button>
+                        <input
+                          type="number"
+                          min={currentSrcSpec.min}
+                          max={currentSrcSpec.max}
+                          step={currentSrcSpec.step}
+                          value={sourceSetting}
+                          onChange={(e) => {
+                            setActivePreset(null);
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val)) setSourceSetting(val);
+                          }}
+                          className="w-20 text-center bg-white border border-neutral-400 rounded py-1 text-lg font-semibold tabular-nums focus:outline-none focus:border-neutral-900"
+                        />
+                        <button
+                          onClick={() => {
+                            setActivePreset(null);
+                            setSourceSetting((prev) =>
+                              Math.min(currentSrcSpec.max, Number((prev + currentSrcSpec.step).toFixed(1)))
+                            );
+                          }}
+                          className="w-8 h-8 rounded border border-neutral-300 bg-white hover:bg-neutral-100"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    <input
+                      type="range"
+                      min={currentSrcSpec.min}
+                      max={currentSrcSpec.max}
+                      step={currentSrcSpec.step}
+                      value={sourceSetting}
+                      onChange={(e) => {
+                        setActivePreset(null);
+                        setSourceSetting(parseFloat(e.target.value));
+                      }}
+                      className="w-full accent-neutral-800 cursor-pointer"
+                    />
+
+                    <div className="flex justify-between text-xs text-neutral-500 tabular-nums">
+                      <span>고움 ({currentSrcSpec.min})</span>
+                      <span>굵음 ({currentSrcSpec.max})</span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 pt-5 border-t border-neutral-200">
+                    <h2 className="text-base font-semibold">2. 원두 물성 및 추출 환경 변수</h2>
+
+                    <div className="space-y-1.5">
+                      <label className="text-sm text-neutral-700">
+                        원두 배전도 (조직 취성 및 미분 발생 계수 반영)
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {Object.entries(ROAST_FACTORS).map(([key, item]) => (
+                          <button
+                            key={key}
+                            onClick={() => {
+                              setActivePreset(null);
+                              setRoastLevel(key);
+                            }}
+                            className={`p-2.5 rounded border text-left ${
+                              roastLevel === key
+                                ? 'border-neutral-900 bg-neutral-100'
+                                : 'border-neutral-300 bg-white hover:bg-neutral-50'
+                            }`}
+                          >
+                            <div className="text-sm font-medium">{item.label}</div>
+                            <div className="text-xs text-neutral-500 mt-0.5">{item.densityDesc}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-sm text-neutral-700">
+                        추출 방식 및 푸어 구조 (미분 이동 및 필터 막힘 계수)
+                      </label>
+                      <select
+                        value={brewMethod}
+                        onChange={(e) => {
+                          setActivePreset(null);
+                          setBrewMethod(e.target.value);
+                        }}
+                        className="w-full bg-white border border-neutral-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-neutral-900"
+                      >
+                        {Object.entries(BREW_METHODS).map(([key, item]) => (
+                          <option key={key} value={key}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-neutral-500">{BREW_METHODS[brewMethod].desc}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 pt-5 border-t border-neutral-200">
+                    <h2 className="text-base font-semibold">3. 치환 알고리즘 목표 설정</h2>
+                    <div className="space-y-2">
+                      {Object.values(COMPENSATION_MODES).map((mode) => {
+                        const active = compMode === mode.id;
+                        return (
+                          <button
+                            key={mode.id}
+                            onClick={() => setCompMode(mode.id)}
+                            className={`w-full p-3 rounded border text-left ${
+                              active
+                                ? 'border-neutral-900 bg-neutral-100'
+                                : 'border-neutral-300 bg-white hover:bg-neutral-50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-medium">{mode.title}</span>
+                              <span className="text-xs text-neutral-500 shrink-0">{mode.badge}</span>
+                            </div>
+                            <p className="text-xs text-neutral-600 mt-1 leading-relaxed">{mode.desc}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 우측: 결과 */}
+              <div className="lg:col-span-7 space-y-6">
+                <div className={`${card} border-neutral-400 p-5`}>
+                  <div className="flex flex-col md:flex-row md:items-start justify-between gap-5">
+                    <div className="space-y-3 flex-1">
+                      <div className="text-sm font-semibold text-neutral-600">
+                        1Zpresso K-Plus 최종 추천 세팅
+                      </div>
+
+                      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+                        <span className="text-5xl font-bold tabular-nums">{analysis.recommendedClicks}</span>
+                        <span className="text-lg text-neutral-600">클릭</span>
+                        {analysis.clickDelta !== 0 && (
+                          <span className="text-xs px-2 py-1 rounded border border-neutral-300 text-neutral-700">
+                            순수 D50 매칭({analysis.rawKPlusClicks}c) 대비 +{analysis.clickDelta}클릭 유속 보정됨
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="border border-neutral-300 bg-neutral-50 rounded p-3 flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs text-neutral-500">K-Plus 외부 숫자 링 위치 (영점 기준)</div>
+                          <div className="text-base font-semibold mt-0.5">{analysis.dialString}</div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span className="text-xs text-neutral-500 block">다이얼 코드</span>
+                          <span className="font-mono text-xl font-semibold bg-white px-2.5 py-0.5 rounded border border-neutral-300 inline-block mt-0.5">
+                            {analysis.shortDialCode}
+                          </span>
+                        </div>
+                      </div>
+
+                      <p className="text-sm text-neutral-700 leading-relaxed">
+                        <span className="font-semibold">추출 시간 예측: </span>
+                        {analysis.drawdownPrediction}
+                      </p>
+                    </div>
+
+                    <div className="w-full md:w-56 shrink-0 border border-neutral-300 rounded p-4 text-center">
+                      <div className="text-xs text-neutral-500">회전 {analysis.rotations}</div>
+                      <div className="text-2xl font-semibold font-mono">
+                        #{analysis.dialNumber}.{analysis.subClick}
+                      </div>
+                      <div className="text-xs text-neutral-500 font-mono">{analysis.kPlusVerticalUm}µm 이동</div>
+
+                      <div className="mt-3">
+                        <div className="h-1.5 bg-neutral-200 rounded-sm">
+                          <div
+                            className="h-full bg-neutral-800 rounded-sm"
+                            style={{ width: `${((analysis.recommendedClicks % 90) / 90) * 100}%` }}
+                          />
+                        </div>
+                        <div className="grid grid-cols-9 mt-1 text-xs font-mono text-left">
+                          {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((num) => (
+                            <span
+                              key={num}
+                              className={analysis.dialNumber === num ? 'font-bold text-neutral-900' : 'text-neutral-400'}
+                            >
+                              {num}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="text-xs text-neutral-500 mt-3">1클릭 = 22µm 수직 이동 (90클릭/회전)</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 비교표 */}
+                <div className={`${card} p-5 space-y-3`}>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <h3 className="text-base font-semibold">마이크론(µm) 정량 치수 및 미분 비교 분석표</h3>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[640px] text-left border-collapse text-sm">
+                      <thead>
+                        <tr className="border-b border-neutral-300 text-xs text-neutral-600">
+                          <th className="py-2 px-3 font-medium">정량 분석 지표</th>
+                          <th className="py-2 px-3 font-medium">
+                            원본: {analysis.src.shortName} ({sourceSetting})
+                          </th>
+                          <th className="py-2 px-3 font-medium">
+                            K-Plus 단순 D50 매칭 ({analysis.rawKPlusClicks}c)
+                          </th>
+                          <th className="py-2 px-3 font-semibold bg-neutral-100 text-neutral-900">
+                            K-Plus 수리학 보정 ({analysis.recommendedClicks}c 권장)
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-200 tabular-nums">
+                        <tr>
+                          <td className="py-3 px-3">
+                            <div className="font-medium">주 입도 피크 (D50)</div>
+                            <div className="text-xs text-neutral-500">가장 많은 부피를 차지하는 평균 입자 크기</div>
+                          </td>
+                          <td className="py-3 px-3">{analysis.srcD50Um} µm</td>
+                          <td className="py-3 px-3">
+                            {analysis.srcD50Um} µm <span className="text-xs text-neutral-500">(동일)</span>
+                          </td>
+                          <td className="py-3 px-3 bg-neutral-100 font-semibold">
+                            {analysis.kPlusTargetD50Um} µm{' '}
+                            <span className="text-xs font-normal">
+                              (+{analysis.kPlusTargetD50Um - analysis.srcD50Um}µm)
+                            </span>
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td className="py-3 px-3">
+                            <div className="font-medium">축 수직 이동량 / 유효 버 간격</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            {analysis.srcVerticalUm} µm / {analysis.srcBurrGapUm} µm
+                          </td>
+                          <td className="py-3 px-3">
+                            {analysis.rawKPlusClicks * 22} µm / {Math.round(analysis.rawKPlusClicks * 22 * 0.68)} µm
+                          </td>
+                          <td className="py-3 px-3 bg-neutral-100 font-semibold">
+                            {analysis.kPlusVerticalUm} µm / {analysis.kPlusBurrGapUm} µm
+                          </td>
+                        </tr>
+
+                        <tr>
+                          <td className="py-3 px-3">
+                            <div className="font-medium">미분 발생 비율 (&lt;100µm)</div>
+                            <div className="text-xs text-neutral-500">추출 유속 저항과 바디감을 지배하는 미립자</div>
+                          </td>
+                          <td className="py-3 px-3">{analysis.srcFinesPct}%</td>
+                          <td className="py-3 px-3 text-red-700">
+                            {analysis.kPlusUncompFinesPct}%{' '}
+                            <span className="text-xs">
+                              (+{(analysis.kPlusUncompFinesPct - analysis.srcFinesPct).toFixed(1)}%p 과다)
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 bg-neutral-100 font-semibold">{analysis.kPlusCompFinesPct}%</td>
+                        </tr>
+
+                        <tr>
+                          <td className="py-3 px-3">
+                            <div className="font-medium">유체역학적 유효 입경 (D[3,2])</div>
+                            <div className="text-xs text-neutral-500">물이 커피 베드를 통과할 때 체감하는 유효 투수 입경</div>
+                          </td>
+                          <td className="py-3 px-3">{analysis.srcEffectiveHydroUm} µm</td>
+                          <td className="py-3 px-3 text-red-700">
+                            {analysis.kPlusUncompHydroUm} µm <span className="text-xs">(유속 저하)</span>
+                          </td>
+                          <td className="py-3 px-3 bg-neutral-100 font-semibold">
+                            {analysis.kPlusCompHydroUm} µm <span className="text-xs font-normal">(유속 복원)</span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 입도 분포 곡선 */}
+                <div className={`${card} p-5 space-y-4`}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <h3 className="text-base font-semibold">
+                      입도 분포 곡선 (µm) 시뮬레이션
+                    </h3>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-neutral-700">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-4 h-0.5 bg-neutral-900 inline-block" />
+                        원본 ({analysis.src.shortName})
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-4 border-t-2 border-dashed border-red-600 inline-block" />
+                        K-Plus 보정 전 ({analysis.rawKPlusClicks}c)
+                      </span>
+                      <span className="flex items-center gap-1.5 font-semibold">
+                        <span className="w-4 h-0.5 bg-blue-600 inline-block" />
+                        K-Plus 보정 후 ({analysis.recommendedClicks}c)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="border border-neutral-200 rounded p-3 bg-white">
+                    <svg viewBox="0 0 640 220" className="w-full h-48 sm:h-56 overflow-visible">
+                      {[100, 300, 500, 700, 900, 1100, 1300, 1500].map((umMark) => {
+                        const x = ((umMark - 30) / (1550 - 30)) * 600 + 25;
+                        const isFinesLine = umMark === 100;
+                        return (
+                          <g key={umMark}>
+                            <line
+                              x1={x}
+                              y1={10}
+                              x2={x}
+                              y2={190}
+                              stroke={isFinesLine ? '#dc2626' : '#e5e5e5'}
+                              strokeDasharray={isFinesLine ? '3 3' : undefined}
+                              strokeWidth={1}
+                            />
+                            <text
+                              x={x}
+                              y={206}
+                              textAnchor="middle"
+                              fontSize="10"
+                              fill={isFinesLine ? '#dc2626' : '#737373'}
+                            >
+                              {umMark}µm
+                            </text>
+                          </g>
+                        );
+                      })}
+
+                      <text x={32} y={24} fontSize="10" fill="#dc2626">
+                        &lt;100µm 미분 영역
+                      </text>
+
+                      <g transform="translate(25, 0)">
+                        <line x1={0} y1={190} x2={600} y2={190} stroke="#a3a3a3" strokeWidth={1} />
+
+                        <path d={buildSvgArea(psdChartData, 'srcY', 600, 190)} fill="#171717" fillOpacity="0.06" />
+                        <path
+                          d={buildSvgPath(psdChartData, 'srcY', 600, 190)}
+                          fill="none"
+                          stroke="#171717"
+                          strokeWidth="2"
+                        />
+
+                        <path
+                          d={buildSvgPath(psdChartData, 'kUncompY', 600, 190)}
+                          fill="none"
+                          stroke="#dc2626"
+                          strokeWidth="1.5"
+                          strokeDasharray="4 4"
+                        />
+
+                        <path d={buildSvgArea(psdChartData, 'kCompY', 600, 190)} fill="#2563eb" fillOpacity="0.1" />
+                        <path
+                          d={buildSvgPath(psdChartData, 'kCompY', 600, 190)}
+                          fill="none"
+                          stroke="#2563eb"
+                          strokeWidth="2"
+                        />
+                      </g>
+                    </svg>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-neutral-200 text-sm">
+                    <div>
+                      <div className="font-semibold">왜 단순 D50 일치로는 맛과 유속이 다른가요?</div>
+                      <p className="text-neutral-600 mt-1 leading-relaxed">
+                        그래프 좌측 <strong>100µm 이하 미분 피크</strong>와 우측 <strong>굵은 입자 꼬리</strong>의 면적 차이 때문입니다. K-Plus의 48mm 코니컬 버는 C40(39mm)이나 EK43(98mm Flat) 대비 회전 선속도와 초기 파쇄 압력이 높아 동일 D50에서 미분이 더 많이 생성됩니다.
+                      </p>
+                    </div>
+                    <div>
+                      <div className="font-semibold">수리학적 우측 이동의 원리</div>
+                      <p className="text-neutral-600 mt-1 leading-relaxed">
+                        K-Plus의 주 피크(초록색 실선)를 원본보다 <strong>+{analysis.kPlusTargetD50Um - analysis.srcD50Um}µm ({analysis.clickDelta}클릭)</strong> 우측으로 이동시키면, 미분 총량이 감소하고 굵은 입자가 지지대 역할을 하여 원본 레시피와 동일한 필터 투수율과 클린컵을 달성합니다.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 브루잉 보정 */}
+                <div className={`${card} p-5 space-y-4`}>
+                  <h3 className="text-base font-semibold">원본 레시피 완벽 재현을 위한 브루잉 보정 프로토콜</h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="border border-neutral-300 rounded p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-sm font-semibold">
+                        <span>권장 추출 수온 보정</span>
+                        <span className="font-mono">
+                          {analysis.tempDelta === 0 ? '동일 유지' : `${analysis.tempDelta}°C`}
+                        </span>
+                      </div>
+                      <p className="text-sm text-neutral-600 leading-relaxed">
+                        {sourceGrinder.startsWith('ek43')
+                          ? 'EK43 레시피(보통 94~98°C)를 K-Plus에 그대로 적용하면 미분에서 잡미가 과다 추출됩니다. 원본 레시피보다 수온을 1.5~2°C 낮추어 추출하세요.'
+                          : '코만단테 레시피와 거의 동일한 수온을 사용하되, 중후반부 쓴맛이 감지되면 수온을 0.5~1°C 낮추면 단맛 밸런스가 살아납니다.'}
+                      </p>
+                    </div>
+
+                    <div className="border border-neutral-300 rounded p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-sm font-semibold">
+                        <span>푸어 유량 & 스월링(교반)</span>
+                        <span className="text-xs font-normal text-neutral-600 border border-neutral-300 rounded px-1.5 py-0.5">
+                          저교반 권장
+                        </span>
+                      </div>
+                      <p className="text-sm text-neutral-600 leading-relaxed">{analysis.pourAdvice}</p>
+                    </div>
+
+                    <div className="border border-neutral-300 rounded p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-sm font-semibold">
+                        <span>K-Plus 분쇄 테크닉 (팁)</span>
+                      </div>
+                      <p className="text-sm text-neutral-600 leading-relaxed">
+                        EK43이나 C40 수준의 극도로 깔끔한 클린컵을 원할 경우, K-Plus를 <strong>약 30~45도 기울여서 분쇄</strong>하면 원두 투입량이 줄어들어 미분이 최대 15% 감소합니다. (이 경우 보정 클릭에서 -2클릭 얄팍하게 조이세요.)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
